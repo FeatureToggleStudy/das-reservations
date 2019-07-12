@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading;
@@ -10,7 +11,11 @@ using Microsoft.AspNetCore.Mvc;
 using Moq;
 using NUnit.Framework;
 using SFA.DAS.Reservations.Application.Employers.Queries;
+using SFA.DAS.Reservations.Application.Reservations.Commands.CreateReservationLevyEmployer;
+using SFA.DAS.Reservations.Application.Reservations.Queries.GetAccountReservationStatus;
 using SFA.DAS.Reservations.Application.Reservations.Queries.GetAvailableReservations;
+using SFA.DAS.Reservations.Domain.Employers;
+using SFA.DAS.Reservations.Domain.Interfaces;
 using SFA.DAS.Reservations.Web.Controllers;
 using SFA.DAS.Reservations.Web.Infrastructure;
 using SFA.DAS.Reservations.Web.Models;
@@ -175,5 +180,129 @@ namespace SFA.DAS.Reservations.Web.UnitTests.Reservations
                 reservationsResult.Reservations
                     .Select(reservation => new AvailableReservationViewModel(reservation)));
         }
+        
+        [Test, MoqAutoData]
+        public async Task ThenChecksEmployerLevyStatus(
+            ReservationsRouteModel routeModel,
+            SelectReservationViewModel viewModel,
+            [Frozen] GetTrustedEmployersResponse employersResponse,
+            Employer employer,
+            GetAvailableReservationsResult reservationsResult,
+            GetAccountReservationStatusResponse accountStatusResponse,
+            [Frozen]Mock<IMediator> mediator,
+            ReservationsController controller
+            )
+        {
+            //Arrange
+            routeModel.UkPrn = 2442;
+            routeModel.AccountLegalEntityPublicHashedId = employer.AccountLegalEntityPublicHashedId;
+            accountStatusResponse.CanAutoCreateReservations = true;
+            employersResponse.Employers = new List<Employer> {employer};
+            mediator.Setup(x => x.Send(It.IsAny<GetTrustedEmployersQuery>(), CancellationToken.None))
+                .ReturnsAsync(employersResponse);
+            mediator.Setup(x => x.Send(It.IsAny<GetAccountReservationStatusQuery>(), CancellationToken.None))
+                .ReturnsAsync(accountStatusResponse);
+
+            //Act
+            await controller.SelectReservation(routeModel, viewModel);
+
+            //Assert
+            mediator.Verify(x =>
+                x.Send(It.Is<GetAccountReservationStatusQuery>(query => query.AccountId == employer.AccountId),CancellationToken.None),Times.Once());
+        }
+
+        [Test, MoqAutoData]
+        public async Task AndHasLevyPayingEmployer_ThenCreatesReservationInTheBackground(
+            ReservationsRouteModel routeModel,
+            SelectReservationViewModel viewModel,
+            GetAvailableReservationsResult reservationsResult,
+            CreateReservationLevyEmployerResult createReservationLevyResult,
+            [Frozen]Mock<IMediator> mediator,
+            ReservationsController controller
+        )
+        {
+            //Arrange
+            var employersResponse = new GetTrustedEmployersResponse
+            {
+                Employers = new List<Employer>
+                {
+                    new Employer {AccountLegalEntityPublicHashedId = routeModel.AccountLegalEntityPublicHashedId}
+                }
+            };
+            var accountStatusResponse = new GetAccountReservationStatusResponse
+            {
+                CanAutoCreateReservations = true
+            };
+
+            createReservationLevyResult.ReservationId = Guid.NewGuid();
+            
+            mediator.Setup(x => x.Send(It.IsAny<GetTrustedEmployersQuery>(), CancellationToken.None))
+                .ReturnsAsync(employersResponse);
+            mediator.Setup(x => x.Send(It.IsAny<GetAccountReservationStatusQuery>(), CancellationToken.None))
+                .ReturnsAsync(accountStatusResponse);
+            mediator.Setup(x => x.Send(It.IsAny<CreateReservationLevyEmployerCommand>(), CancellationToken.None))
+                .ReturnsAsync(createReservationLevyResult);
+            
+            //Act   
+            await controller.SelectReservation(routeModel, viewModel);
+
+
+            //Assert
+            mediator.Verify(x =>
+                x.Send(It.Is<CreateReservationLevyEmployerCommand>(query => query.AccountId == employersResponse.Employers.First().AccountId), CancellationToken.None), Times.Once());
+
+        }
+
+        [Test, MoqAutoData]
+        public async Task AndHasLevyPayingEmployerAndReservationCreated_ThenRedirectsToAddAnApprentice(
+            ReservationsRouteModel routeModel,
+            SelectReservationViewModel viewModel,
+            GetAvailableReservationsResult reservationsResult,
+            CreateReservationLevyEmployerResult createReservationLevyResult,
+            [Frozen]Mock<IMediator> mockMediator,
+            [Frozen]Mock<IExternalUrlHelper> urlHelper,
+            string addApprenticeUrl,
+            ReservationsController controller
+        )
+        {
+            //Arrange
+            var employersResponse = new GetTrustedEmployersResponse
+            {
+                Employers = new List<Employer>
+                {
+                    new Employer {AccountLegalEntityPublicHashedId = routeModel.AccountLegalEntityPublicHashedId}
+                }
+            };
+            var accountStatusResponse = new GetAccountReservationStatusResponse
+            {
+                CanAutoCreateReservations = true
+            };
+            createReservationLevyResult.ReservationId = Guid.NewGuid();
+
+            mockMediator.Setup(x => x.Send(It.IsAny<GetTrustedEmployersQuery>(), CancellationToken.None))
+                .ReturnsAsync(employersResponse);
+            mockMediator.Setup(x => x.Send(It.IsAny<GetAccountReservationStatusQuery>(), CancellationToken.None))
+                .ReturnsAsync(accountStatusResponse);
+            mockMediator.Setup(x => x.Send(It.IsAny<CreateReservationLevyEmployerCommand>(), CancellationToken.None))
+                .ReturnsAsync(createReservationLevyResult);
+
+            viewModel.CreateNew = null;
+            urlHelper
+                .Setup(helper => helper.GenerateAddApprenticeUrl(
+                    It.Is<UrlParameters>(parameters =>
+                        parameters.Folder == routeModel.UkPrn.ToString() &&
+                        parameters.Id == "unapproved" &&
+                        parameters.Controller == viewModel.CohortReference &&
+                        parameters.Action == "apprentices/add" &&
+                        parameters.QueryString == $"?reservationId={createReservationLevyResult.ReservationId}")))
+                .Returns(addApprenticeUrl);
+
+            var result = await controller.SelectReservation(routeModel, viewModel) as RedirectResult;
+            Assert.IsNotNull(result);
+            result?.Url.Should().Be(addApprenticeUrl);
+        }
+
+
+
     }
 }
